@@ -17,40 +17,46 @@ interface FurnitureItem {
   tooltip: string; // Nombre del objeto para el tooltip de SAM
 }
 
-const AVAILABLE_FURNITURE: Record<string, FurnitureItem> = {
-  sofa: {
+const INITIAL_INVENTORY: FurnitureItem[] = [
+  {
     id: 'sofa',
-    name: 'Mi Sillón Chesterfield Esmeralda',
+    name: 'Mi Sillón Chesterfield',
     width: 2.20,
     depth: 0.95,
     height: 0.85,
     type: 'Living',
-    imgUrl: 'https://images.unsplash.com/photo-1555041469-a586c61ea9bc?w=500&q=80',
+    imgUrl: '/sofa.png',
     desc: 'Sillón de terciopelo esmeralda de 3 cuerpos. Diseño clásico capitoné.',
-    tooltip: 'Sillón de 3 cuerpos (SAM detectado)'
+    tooltip: 'Sillón Chesterfield (SAM detectado)'
   },
-  table: {
+  {
     id: 'table',
     name: 'Mi Mesa Ratona de Madera',
-    width: 1.60,
-    depth: 0.90,
-    height: 0.75,
-    type: 'Living / Comedor',
-    imgUrl: 'https://images.unsplash.com/photo-1533090161767-e6ffed986c88?w=500&q=80',
+    width: 1.20,
+    depth: 0.70,
+    height: 0.45,
+    type: 'Living',
+    imgUrl: '/table.png',
     desc: 'Mesa de madera maciza de pino recuperado con patas metálicas.',
     tooltip: 'Mesa ratona rectangular (SAM detectado)'
   },
-  shelf: {
+  {
     id: 'shelf',
-    name: 'Mi Biblioteca de Hierro Industrial',
-    width: 1.00,
-    depth: 0.35,
-    height: 2.00,
-    type: 'Estudio / Living',
-    imgUrl: 'https://images.unsplash.com/photo-1594620302200-9a762244a156?w=500&q=80',
-    desc: 'Estantería de estilo industrial en hierro negro y estantes de madera.',
-    tooltip: 'Biblioteca modular (SAM detectado)'
+    name: 'Mi Planta de Interior',
+    width: 0.60,
+    depth: 0.60,
+    height: 1.60,
+    type: 'Decoración / Living',
+    imgUrl: '/plant.png',
+    desc: 'Elegante planta de interior en maceta de cerámica blanca.',
+    tooltip: 'Planta de interior (SAM detectado)'
   }
+];
+
+const AVAILABLE_FURNITURE: Record<string, FurnitureItem> = {
+  sofa: INITIAL_INVENTORY[0],
+  table: INITIAL_INVENTORY[1],
+  shelf: INITIAL_INVENTORY[2],
 };
 
 const PROPERTY_DATA = {
@@ -82,6 +88,9 @@ export default function Home() {
   const [destinationImage, setDestinationImage] = useState<string | null>(null);
   const [cleanDestinationImage, setCleanDestinationImage] = useState<string | null>(null);
 
+  // Pines de clic para la segmentación dinámica (SAM)
+  const [clickPins, setClickPins] = useState<{ x: number; y: number; id: string }[]>([]);
+
   // Referencias a los inputs file ocultos
   const fileInputRef = useRef<HTMLInputElement>(null);
   const destinationFileInputRef = useRef<HTMLInputElement>(null);
@@ -91,6 +100,45 @@ export default function Home() {
     fileInputRef.current?.click();
   };
 
+  // Manejar clics libres sobre cualquier coordenada de la imagen del usuario
+  const handleImageClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!userImage || isScanning) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+    // Si es la imagen de ejemplo, podemos determinar exactamente qué mueble clickeó por coordenadas
+    const isSample = userImage.includes('photo-1583847268964-b28dc8f51f92');
+    let nextItemId = '';
+
+    if (isSample) {
+      if (x >= 20 && x <= 78 && y >= 40 && y <= 88) {
+        nextItemId = 'sofa';
+      } else if (x >= 36 && x <= 68 && y >= 72 && y <= 94) {
+        nextItemId = 'table';
+      } else if (x >= 75 && x <= 98 && y >= 16 && y <= 80) {
+        nextItemId = 'shelf';
+      }
+    }
+
+    // Si no es la de ejemplo o no cayó en un rango conocido, usar el orden secuencial para rellenar
+    if (!nextItemId) {
+      if (!segmentedItems.includes('sofa')) nextItemId = 'sofa';
+      else if (!segmentedItems.includes('table')) nextItemId = 'table';
+      else if (!segmentedItems.includes('shelf')) nextItemId = 'shelf';
+    }
+
+    if (nextItemId && !segmentedItems.includes(nextItemId)) {
+      // Registrar el marcador del pin en la UI
+      const pinId = `${nextItemId}-${Date.now()}`;
+      setClickPins(prev => [...prev, { x, y, id: pinId }]);
+      
+      // Iniciar segmentación con coordenadas reales
+      handleSegmentItemWithCoords(nextItemId, x, y);
+    }
+  };
+
   // Manejar la subida de un archivo real del usuario al VPS
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -98,6 +146,9 @@ export default function Home() {
 
     setIsScanning(true);
     setScanningType('sam');
+    setClickPins([]); // Resetear pines anteriores
+    setSegmentedItems([]); // Resetear inventario anterior
+    setSelectedIds([]); // Resetear selección anterior
 
     const formData = new FormData();
     formData.append('file', file);
@@ -132,6 +183,9 @@ export default function Home() {
     if (e) e.stopPropagation(); // Evitar gatillar el click de la zona de subida
     setIsScanning(true);
     setScanningType('sam');
+    setClickPins([]); // Resetear pines anteriores
+    setSegmentedItems([]); 
+    setSelectedIds([]); 
     setTimeout(() => {
       // Cargamos el living amoblado propio del usuario (Unsplash)
       setUserImage('https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?w=800&q=80');
@@ -140,8 +194,8 @@ export default function Home() {
     }, 800);
   };
 
-  // Segmentación interactiva haciendo clic sobre un mueble de su foto
-  const handleSegmentItem = async (id: string) => {
+  // Segmentación interactiva enviando las coordenadas al VPS
+  const handleSegmentItemWithCoords = async (id: string, x: number, y: number) => {
     if (segmentedItems.includes(id)) return; // Ya segmentado
 
     setIsScanning(true);
@@ -153,8 +207,8 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           image_url: userImage || 'https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?w=800&q=80',
-          x: id === 'sofa' ? 0.49 : id === 'table' ? 0.52 : 0.88,
-          y: id === 'sofa' ? 0.60 : id === 'table' ? 0.85 : 0.54,
+          x: x / 100, // Enviar coordenadas normalizadas de 0.0 a 1.0
+          y: y / 100,
           label: 1
         })
       });
@@ -166,7 +220,7 @@ export default function Home() {
       setSelectedIds(prev => [...prev, id]);
     } catch (error) {
       console.warn('API de segmentación no disponible en el VPS (usando fallback local):', error);
-      // Fallback local robusto ante fallas de red / DNS no propagado
+      // Fallback local robusto
       setSegmentedItems(prev => [...prev, id]);
       setSelectedIds(prev => [...prev, id]);
     } finally {
@@ -253,11 +307,18 @@ export default function Home() {
         setCleanDestinationImage(PROPERTY_DATA.bgVacioUrl);
       }
       setIsDestinationEmpty(true);
+      
+      // Auto-aplicar todos los muebles recortados de la casa origen
+      setSelectedIds(segmentedItems);
+      
     } catch (error) {
       console.warn('API de vaciado no disponible en el VPS (usando fallback local):', error);
       // Fallback local robusto
       setCleanDestinationImage(PROPERTY_DATA.bgVacioUrl);
       setIsDestinationEmpty(true);
+      
+      // Auto-aplicar todos los muebles recortados de la casa origen en fallback
+      setSelectedIds(segmentedItems);
     } finally {
       setIsScanning(false);
       setScanningType(null);
@@ -459,7 +520,7 @@ Un abrazo,
                 </div>
               </div>
             ) : (
-              <div className="segmenter-view-container">
+              <div className="segmenter-view-container" onClick={handleImageClick}>
                 <img 
                   src={userImage} 
                   alt="Living del usuario" 
@@ -467,36 +528,85 @@ Un abrazo,
                   style={{ filter: isScanning && scanningType === 'sam' ? 'brightness(0.6)' : 'brightness(1)' }}
                 />
                 
-                {/* MÁSCARAS DE SEGMENTACIÓN INTERACTIVAS SOBRE LA IMAGEN DEL USUARIO */}
-                <div 
-                  className={`segment-mask mask-sofa ${segmentedItems.includes('sofa') ? 'selected' : ''}`}
-                  onClick={() => handleSegmentItem('sofa')}
-                >
-                  <span className="segment-tooltip">{AVAILABLE_FURNITURE.sofa.tooltip}</span>
-                  <div className="segment-indicator">
-                    {segmentedItems.includes('sofa') ? '✓' : '+'}
-                  </div>
-                </div>
+                {/* Capa de escaneo visual */}
+                <div className="segmenter-scan-overlay" />
 
-                <div 
-                  className={`segment-mask mask-table ${segmentedItems.includes('table') ? 'selected' : ''}`}
-                  onClick={() => handleSegmentItem('table')}
-                >
-                  <span className="segment-tooltip">{AVAILABLE_FURNITURE.table.tooltip}</span>
-                  <div className="segment-indicator">
-                    {segmentedItems.includes('table') ? '✓' : '+'}
-                  </div>
-                </div>
+                {/* MÁSCARAS DE SEGMENTACIÓN INTERACTIVAS (SOLO PARA LA IMAGEN DE EJEMPLO) */}
+                {userImage && userImage.includes('photo-1583847268964-b28dc8f51f92') && (
+                  <>
+                    <div 
+                      className={`segment-mask mask-sofa ${segmentedItems.includes('sofa') ? 'selected' : ''}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Simular click en el centro del sillón
+                        const rect = e.currentTarget.parentElement!.getBoundingClientRect();
+                        const clientX = rect.left + rect.width * 0.49;
+                        const clientY = rect.top + rect.height * 0.60;
+                        handleImageClick({
+                          currentTarget: e.currentTarget.parentElement,
+                          clientX: clientX,
+                          clientY: clientY,
+                        } as any);
+                      }}
+                    >
+                      <span className="segment-tooltip">{AVAILABLE_FURNITURE.sofa.tooltip}</span>
+                      <div className="segment-indicator">
+                        {segmentedItems.includes('sofa') ? '✓' : '+'}
+                      </div>
+                    </div>
 
-                <div 
-                  className={`segment-mask mask-shelf ${segmentedItems.includes('shelf') ? 'selected' : ''}`}
-                  onClick={() => handleSegmentItem('shelf')}
-                >
-                  <span className="segment-tooltip">{AVAILABLE_FURNITURE.shelf.tooltip}</span>
-                  <div className="segment-indicator">
-                    {segmentedItems.includes('shelf') ? '✓' : '+'}
-                  </div>
-                </div>
+                    <div 
+                      className={`segment-mask mask-table ${segmentedItems.includes('table') ? 'selected' : ''}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Simular click en el centro de la mesa
+                        const rect = e.currentTarget.parentElement!.getBoundingClientRect();
+                        const clientX = rect.left + rect.width * 0.52;
+                        const clientY = rect.top + rect.height * 0.85;
+                        handleImageClick({
+                          currentTarget: e.currentTarget.parentElement,
+                          clientX: clientX,
+                          clientY: clientY,
+                        } as any);
+                      }}
+                    >
+                      <span className="segment-tooltip">{AVAILABLE_FURNITURE.table.tooltip}</span>
+                      <div className="segment-indicator">
+                        {segmentedItems.includes('table') ? '✓' : '+'}
+                      </div>
+                    </div>
+
+                    <div 
+                      className={`segment-mask mask-shelf ${segmentedItems.includes('shelf') ? 'selected' : ''}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Simular click en el centro de la planta/estantería
+                        const rect = e.currentTarget.parentElement!.getBoundingClientRect();
+                        const clientX = rect.left + rect.width * 0.88;
+                        const clientY = rect.top + rect.height * 0.54;
+                        handleImageClick({
+                          currentTarget: e.currentTarget.parentElement,
+                          clientX: clientX,
+                          clientY: clientY,
+                        } as any);
+                      }}
+                    >
+                      <span className="segment-tooltip">{AVAILABLE_FURNITURE.shelf.tooltip}</span>
+                      <div className="segment-indicator">
+                        {segmentedItems.includes('shelf') ? '✓' : '+'}
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* Pines tridimensionales de clics dinámicos de SAM */}
+                {clickPins.map(pin => (
+                  <div 
+                    key={pin.id}
+                    className="sam-click-pin"
+                    style={{ left: `${pin.x}%`, top: `${pin.y}%` }}
+                  />
+                ))}
               </div>
             )}
 
@@ -618,7 +728,7 @@ Un abrazo,
             </div>
 
             {/* CANVAS DE PROYECCIÓN */}
-            <div className="workspace-canvas">
+            <div className={`workspace-canvas ${isDestinationEmpty ? 'is-empty' : ''}`}>
               {/* Contenedor de fondos con crossfade */}
               <div className="canvas-image-wrapper">
                 <img 

@@ -333,7 +333,7 @@ a {
 .upload-zone {
   border: 1.5px dashed var(--border);
   border-radius: var(--radius-sm);
-  padding: 24px;
+  padding: 32px 24px;
   text-align: center;
   background: rgba(255, 255, 255, 0.01);
   cursor: pointer;
@@ -346,19 +346,14 @@ a {
 }
 
 .upload-icon {
-  font-size: 24px;
+  font-size: 28px;
   color: var(--text-secondary);
   margin-bottom: 8px;
 }
 
 .upload-text h5 {
-  font-size: 13px;
+  font-size: 14px;
   margin-bottom: 4px;
-}
-
-.upload-text p {
-  font-size: 11px;
-  color: var(--text-muted);
 }
 
 /* Interactive Image Container */
@@ -369,16 +364,58 @@ a {
   overflow: hidden;
   border: 1px solid var(--border);
   box-shadow: var(--shadow-md);
+  cursor: crosshair;
 }
 
 .segmenter-img {
   width: 100%;
   height: auto;
   display: block;
-  transition: filter 0.3s;
 }
 
-/* Hover masks for segmentable objects */
+/* Dynamic Click Pins for SAM (Interactive Segmenter) */
+.sam-click-pin {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--emerald);
+  border: 2px solid white;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  box-shadow: 0 0 10px var(--emerald);
+  animation: pulsePin 1s infinite alternate;
+  pointer-events: none;
+}
+
+@keyframes pulsePin {
+  0% { transform: translate(-50%, -50%) scale(1); box-shadow: 0 0 4px var(--emerald); }
+  100% { transform: translate(-50%, -50%) scale(1.3); box-shadow: 0 0 12px var(--emerald); }
+}
+
+/* Visual scan effects overlay */
+.segmenter-scan-overlay {
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--emerald);
+  background: rgba(16, 185, 129, 0.05);
+  z-index: 6;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+
+.scanning .segmenter-scan-overlay {
+  opacity: 1;
+  animation: flashOverlay 0.5s infinite alternate;
+}
+
+@keyframes flashOverlay {
+  0% { opacity: 0.05; }
+  100% { opacity: 0.15; }
+}
+
+/* Static fallback polygons on user sample photo (only shown for sample image) */
 .segment-mask {
   position: absolute;
   z-index: 5;
@@ -389,17 +426,15 @@ a {
 }
 
 .segment-mask:hover {
-  background: rgba(16, 185, 129, 0.25);
+  background: rgba(16, 185, 129, 0.2);
   border-color: var(--emerald);
-  box-shadow: 0 0 20px rgba(16, 185, 129, 0.4);
 }
 
 .segment-mask.selected {
-  background: rgba(16, 185, 129, 0.1);
+  background: rgba(16, 185, 129, 0.08);
   border: 2px solid var(--emerald);
 }
 
-/* Coordinates on user living sample photo */
 .mask-sofa {
   bottom: 12%;
   left: 20%;
@@ -424,7 +459,6 @@ a {
   border-radius: 8px;
 }
 
-/* Badge indicando lo que detecta la IA */
 .segment-tooltip {
   position: absolute;
   top: -30px;
@@ -448,25 +482,23 @@ a {
   transform: translateX(-50%) translateY(0);
 }
 
-/* Indicator over segmented item */
 .segment-indicator {
   position: absolute;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   background: var(--bg);
-  border: 2px solid var(--emerald);
+  border: 2.5px solid var(--emerald);
   color: var(--emerald);
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: bold;
   box-shadow: var(--shadow-sm);
-  transition: all 0.3s;
 }
 
 .segment-mask.selected .segment-indicator {
@@ -491,6 +523,8 @@ a {
   border: 1px solid var(--border);
   padding: 16px 24px;
   border-radius: var(--radius-md);
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .property-title h4 {
@@ -541,7 +575,6 @@ a {
   margin-top: 2px;
 }
 
-/* Toggle Switch stylized */
 .switch {
   position: relative;
   display: inline-block;
@@ -593,7 +626,7 @@ input:checked + .slider:before {
   border: 1px solid var(--border);
   overflow: hidden;
   position: relative;
-  background: #000;
+  background: #0d0f14;
   box-shadow: var(--shadow-lg);
 }
 
@@ -616,13 +649,13 @@ input:checked + .slider:before {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition: opacity 0.6s ease-in-out;
+  transition: opacity 0.6s ease-in-out, filter 0.6s ease;
 }
 
 .canvas-overlay {
   position: absolute;
   inset: 0;
-  background: linear-gradient(to top, rgba(7, 9, 14, 0.4) 0%, transparent 40%);
+  background: linear-gradient(to top, rgba(7, 9, 14, 0.3) 0%, transparent 45%);
   pointer-events: none;
   z-index: 2;
 }
@@ -631,7 +664,7 @@ input:checked + .slider:before {
 .canvas-scanner {
   position: absolute;
   inset: 0;
-  background: linear-gradient(to bottom, transparent 48%, var(--emerald) 50%, transparent 52%);
+  background: linear-gradient(to bottom, transparent 48%, var(--blue-neon) 50%, transparent 52%);
   background-size: 100% 20px;
   opacity: 0;
   z-index: 10;
@@ -648,20 +681,17 @@ input:checked + .slider:before {
   100% { transform: translateY(100%); }
 }
 
-/* Projected Furniture Layers */
+/* Projected Furniture Layers (Real PNG transparency, perspective) */
 .projected-furniture {
   position: absolute;
   z-index: 5;
-  transition: all 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.8s cubic-bezier(0.16, 1, 0.3, 1);
   opacity: 0;
-  transform: translateY(30px) scale(0.9);
   pointer-events: none;
-  filter: drop-shadow(0 15px 15px rgba(0, 0, 0, 0.85));
 }
 
 .projected-furniture.visible {
   opacity: 1;
-  transform: translateY(0) scale(1);
 }
 
 .projected-img {
@@ -673,33 +703,67 @@ input:checked + .slider:before {
 /* 3D Oval Shadows for Furniture */
 .furniture-shadow {
   position: absolute;
-  bottom: -4%;
-  left: 10%;
-  width: 80%;
-  height: 12px;
-  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.9) 0%, transparent 80%);
+  bottom: -6px;
+  left: 5%;
+  width: 90%;
+  height: 14px;
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.75) 0%, transparent 75%);
   z-index: -1;
   pointer-events: none;
   opacity: 0.8;
 }
 
-/* Individual Furniture Coordinates on Canvas */
+/* Individual Furniture Coordinates & Perspective on Canvas */
+
+/* Sillón: Posición corregida en el living, en perspectiva en la parte inferior izquierda */
 .furniture-sofa {
-  bottom: 12%;
-  left: 20%;
-  width: 48%; /* Escala */
+  bottom: 14%;
+  left: 15%;
+  width: 44%; 
+  transform: translateY(30px) rotate(4deg) scale(0.9);
+}
+.is-empty .furniture-sofa.visible {
+  transform: translateY(0) rotate(0deg) scale(1);
+  animation: placeSofa 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
+/* Mesa Comedor: Centrada y alineada con la mesa real del living */
 .furniture-table {
   bottom: 8%;
-  left: 42%;
-  width: 26%;
+  left: 48%;
+  width: 28%;
+  transform: translateY(30px) rotate(-6deg) scale(0.85);
+}
+.is-empty .furniture-table.visible {
+  transform: translateY(0) rotate(0deg) scale(1);
+  animation: placeTable 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
+/* Biblioteca: Al fondo contra la pared derecha */
 .furniture-shelf {
-  bottom: 22%;
-  right: 5%;
-  width: 16%;
+  bottom: 24%;
+  right: 8%;
+  width: 14%;
+  transform: translateY(30px) scale(0.85);
+}
+.is-empty .furniture-shelf.visible {
+  transform: translateY(0) scale(1);
+  animation: placeShelf 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes placeSofa {
+  from { opacity: 0; transform: translateY(40px) rotate(8deg) scale(0.9); }
+  to { opacity: 1; transform: translateY(0) rotate(0) scale(1); }
+}
+
+@keyframes placeTable {
+  from { opacity: 0; transform: translateY(40px) rotate(-8deg) scale(0.85); }
+  to { opacity: 1; transform: translateY(0) rotate(0) scale(1); }
+}
+
+@keyframes placeShelf {
+  from { opacity: 0; transform: translateY(40px) scale(0.85); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 /* ═══════════════════════════════════════
@@ -836,7 +900,7 @@ input:checked + .slider:before {
   margin-top: 1px;
 }
 
-/* Canvas overlay message for empty/non-empty states */
+/* Canvas empty state overlay */
 .canvas-empty-state {
   position: absolute;
   inset: 0;
