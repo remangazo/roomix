@@ -78,8 +78,13 @@ export default function Home() {
   const [isDestinationEmpty, setIsDestinationEmpty] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
 
-  // Referencia al input file oculto
+  // Estados para el departamento de destino dinámico
+  const [destinationImage, setDestinationImage] = useState<string | null>(null);
+  const [cleanDestinationImage, setCleanDestinationImage] = useState<string | null>(null);
+
+  // Referencias a los inputs file ocultos
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const destinationFileInputRef = useRef<HTMLInputElement>(null);
   
   // Gatillar el selector de archivos al hacer clic en la zona de subida
   const handleUploadZoneClick = () => {
@@ -170,6 +175,46 @@ export default function Home() {
     }
   };
 
+  // Manejar la subida de la foto de la propiedad de destino (nuevo hogar)
+  const handleDestinationFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsScanning(true);
+    setScanningType('erase');
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      // Subir foto del depto a buscar
+      const response = await fetch('https://roomix-featureproposal.tuweben72hs.com/api/upload', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await response.json();
+      console.log('API Destination Upload Response:', data);
+
+      if (data.success && data.url) {
+        setDestinationImage(data.url);
+        setIsDestinationEmpty(false); // Volver al estado amoblado para mostrar la nueva foto primero
+        setCleanDestinationImage(null); // Resetear imagen limpia
+      } else {
+        alert('Error al procesar la imagen de destino en el servidor.');
+      }
+    } catch (error) {
+      console.warn('API de subida no disponible en el VPS (usando fallback local):', error);
+      // Fallback local
+      const localUrl = URL.createObjectURL(file);
+      setDestinationImage(localUrl);
+      setIsDestinationEmpty(false);
+      setCleanDestinationImage(null);
+    } finally {
+      setIsScanning(false);
+      setScanningType(null);
+    }
+  };
+
   // Activar/desactivar proyección de los muebles empacados
   const handleToggleProjectedItem = (id: string) => {
     setSelectedIds(prev => 
@@ -179,24 +224,40 @@ export default function Home() {
 
   // Conmutar el vaciado del departamento de destino con inpainting
   const handleToggleDestinationEmpty = async () => {
+    if (isDestinationEmpty) {
+      // Si ya estaba vacío, volvemos a mostrar la versión amoblada
+      setIsDestinationEmpty(false);
+      return;
+    }
+
     setIsScanning(true);
     setScanningType('erase');
+    
+    const imgToClean = destinationImage || PROPERTY_DATA.bgAmuebladoUrl;
     
     try {
       const response = await fetch('https://roomix-featureproposal.tuweben72hs.com/api/clean-property', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          image_url: PROPERTY_DATA.bgAmuebladoUrl
+          image_url: imgToClean
         })
       });
       const data = await response.json();
       console.log('API Clean Response:', data);
-      setIsDestinationEmpty(prev => !prev);
+      
+      if (data.success && data.clean_image_url) {
+        setCleanDestinationImage(data.clean_image_url);
+      } else {
+        // Fallback si no devuelve URL
+        setCleanDestinationImage(PROPERTY_DATA.bgVacioUrl);
+      }
+      setIsDestinationEmpty(true);
     } catch (error) {
       console.warn('API de vaciado no disponible en el VPS (usando fallback local):', error);
       // Fallback local robusto
-      setIsDestinationEmpty(prev => !prev);
+      setCleanDestinationImage(PROPERTY_DATA.bgVacioUrl);
+      setIsDestinationEmpty(true);
     } finally {
       setIsScanning(false);
       setScanningType(null);
@@ -503,9 +564,40 @@ Un abrazo,
                   <span>• {PROPERTY_DATA.livingArea.toFixed(1)} m² útiles</span>
                 </p>
               </div>
-              <div className="badge-ai-audit">
-                <span className="pulse-dot"></span>
-                AI Spatial Audit
+              
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                {/* Botón para subir la foto del departamento a buscar */}
+                <button 
+                  onClick={() => destinationFileInputRef.current?.click()}
+                  style={{
+                    background: 'rgba(59, 130, 246, 0.1)',
+                    border: '1px solid var(--blue-neon)',
+                    color: 'var(--blue-neon)',
+                    padding: '6px 12px',
+                    borderRadius: '12px',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}
+                >
+                  <input 
+                    type="file" 
+                    ref={destinationFileInputRef} 
+                    onChange={handleDestinationFileChange} 
+                    accept="image/*" 
+                    style={{ display: 'none' }} 
+                  />
+                  <span>⬆ Subir depto</span>
+                </button>
+
+                <div className="badge-ai-audit">
+                  <span className="pulse-dot"></span>
+                  AI Spatial Audit
+                </div>
               </div>
             </div>
 
@@ -530,7 +622,7 @@ Un abrazo,
               {/* Contenedor de fondos con crossfade */}
               <div className="canvas-image-wrapper">
                 <img 
-                  src={PROPERTY_DATA.bgAmuebladoUrl} 
+                  src={destinationImage || PROPERTY_DATA.bgAmuebladoUrl} 
                   alt="Departamento Amueblado Antiguo" 
                   className="canvas-bg"
                   style={{ 
@@ -539,7 +631,7 @@ Un abrazo,
                   }}
                 />
                 <img 
-                  src={PROPERTY_DATA.bgVacioUrl} 
+                  src={cleanDestinationImage || PROPERTY_DATA.bgVacioUrl} 
                   alt="Departamento Vacío Limpio" 
                   className="canvas-bg"
                   style={{ 
