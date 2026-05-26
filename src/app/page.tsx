@@ -1,1012 +1,691 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 
 // ═══════════════════════════════════════
-// DATA TYPES & CONSTANTS
+// API CONFIG
 // ═══════════════════════════════════════
-interface FurnitureItem {
+const API_BASE = 'https://roomix-featureproposal.tuweben72hs.com';
+
+// ═══════════════════════════════════════
+// DATA TYPES
+// ═══════════════════════════════════════
+interface SegmentedFurniture {
   id: string;
-  name: string;
-  width: number; // en metros
-  depth: number; // en metros
-  height: number; // en metros
-  type: string;
-  imgUrl: string;
-  desc: string;
-  tooltip: string; // Nombre del objeto para el tooltip de SAM
+  imageUrl: string;       // URL del PNG recortado transparente (del VPS)
+  label: string;          // "Mueble 1", "Mueble 2", etc.
+  selected: boolean;      // Si está seleccionado para la composición
+  clickCoords: { x: number; y: number };
 }
 
-const INITIAL_INVENTORY: FurnitureItem[] = [
-  {
-    id: 'sofa',
-    name: 'Mi Sillón Chesterfield',
-    width: 2.20,
-    depth: 0.95,
-    height: 0.85,
-    type: 'Living',
-    imgUrl: '/sofa.png',
-    desc: 'Sillón de terciopelo esmeralda de 3 cuerpos. Diseño clásico capitoné.',
-    tooltip: 'Sillón Chesterfield (SAM detectado)'
-  },
-  {
-    id: 'table',
-    name: 'Mi Mesa Ratona de Madera',
-    width: 1.20,
-    depth: 0.70,
-    height: 0.45,
-    type: 'Living',
-    imgUrl: '/table.png',
-    desc: 'Mesa de madera maciza de pino recuperado con patas metálicas.',
-    tooltip: 'Mesa ratona rectangular (SAM detectado)'
-  },
-  {
-    id: 'shelf',
-    name: 'Mi Planta de Interior',
-    width: 0.60,
-    depth: 0.60,
-    height: 1.60,
-    type: 'Decoración / Living',
-    imgUrl: '/plant.png',
-    desc: 'Elegante planta de interior en maceta de cerámica blanca.',
-    tooltip: 'Planta de interior (SAM detectado)'
-  }
-];
+interface ClickPin {
+  x: number;
+  y: number;
+  id: string;
+  status: 'pending' | 'done' | 'error';
+}
 
-const AVAILABLE_FURNITURE: Record<string, FurnitureItem> = {
-  sofa: INITIAL_INVENTORY[0],
-  table: INITIAL_INVENTORY[1],
-  shelf: INITIAL_INVENTORY[2],
-};
-
-const PROPERTY_DATA = {
-  address: 'Palermo Hollywood, CABA',
-  rooms: '2 Ambientes',
-  totalArea: 48, // m2
-  livingArea: 18.5, // m2 (área útil estimable del living-comedor)
-  wallLength: 4.80, // largo de la pared principal del living en metros
-  bgAmuebladoUrl: 'https://images.unsplash.com/photo-1502672260266-1c1ef2d93688?w=1200&q=80', // Living del nuevo depto con muebles viejos del inquilino anterior
-  bgVacioUrl: 'https://images.unsplash.com/photo-1513694203232-719a280e022f?w=1200&q=80' // Mismo living vacío (simulado inpainting)
-};
+type AppStep = 'upload-source' | 'segment' | 'upload-dest' | 'compose' | 'result';
 
 // ═══════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════
 export default function Home() {
-  // Estados para el flujo de segmentación del usuario
-  const [userImage, setUserImage] = useState<string | null>(null);
-  const [segmentedItems, setSegmentedItems] = useState<string[]>([]);
-  const [isScanning, setIsScanning] = useState(false);
-  const [scanningType, setScanningType] = useState<'sam' | 'erase' | null>(null);
+  // Flujo principal
+  const [currentStep, setCurrentStep] = useState<AppStep>('upload-source');
 
-  // Estados para la mudanza y proyección
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [isDestinationEmpty, setIsDestinationEmpty] = useState(false);
-  const [copySuccess, setCopySuccess] = useState(false);
+  // Imagen origen (casa del usuario)
+  const [sourceImage, setSourceImage] = useState<string | null>(null);
+  const [sourceImageFile, setSourceImageFile] = useState<string | null>(null); // URL pública en VPS
 
-  // Estados para el departamento de destino dinámico
+  // Muebles segmentados
+  const [segmentedFurniture, setSegmentedFurniture] = useState<SegmentedFurniture[]>([]);
+  const [clickPins, setClickPins] = useState<ClickPin[]>([]);
+
+  // Imagen destino (nueva casa)
   const [destinationImage, setDestinationImage] = useState<string | null>(null);
+  const [destinationImageUrl, setDestinationImageUrl] = useState<string | null>(null); // URL pública en VPS
   const [cleanDestinationImage, setCleanDestinationImage] = useState<string | null>(null);
 
-  // Pines de clic para la segmentación dinámica (SAM)
-  const [clickPins, setClickPins] = useState<{ x: number; y: number; id: string }[]>([]);
+  // Resultado final
+  const [compositeResult, setCompositeResult] = useState<string | null>(null);
 
-  // Referencias a los inputs file ocultos
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const destinationFileInputRef = useRef<HTMLInputElement>(null);
-  
-  // Gatillar el selector de archivos al hacer clic en la zona de subida
-  const handleUploadZoneClick = () => {
-    fileInputRef.current?.click();
-  };
+  // Estados de carga
+  const [isSegmenting, setIsSegmenting] = useState(false);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [isComposing, setIsComposing] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  // Manejar clics libres sobre cualquier coordenada de la imagen del usuario
-  const handleImageClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!userImage || isScanning) return;
+  // Refs
+  const sourceFileRef = useRef<HTMLInputElement>(null);
+  const destFileRef = useRef<HTMLInputElement>(null);
 
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
+  // ═══════════════════════════════════════
+  // HANDLERS
+  // ═══════════════════════════════════════
 
-    // Si es la imagen de ejemplo, podemos determinar exactamente qué mueble clickeó por coordenadas
-    const isSample = userImage.includes('photo-1583847268964-b28dc8f51f92');
-    let nextItemId = '';
-
-    if (isSample) {
-      if (x >= 20 && x <= 78 && y >= 40 && y <= 88) {
-        nextItemId = 'sofa';
-      } else if (x >= 36 && x <= 68 && y >= 72 && y <= 94) {
-        nextItemId = 'table';
-      } else if (x >= 75 && x <= 98 && y >= 16 && y <= 80) {
-        nextItemId = 'shelf';
-      }
-    }
-
-    // Si no es la de ejemplo o no cayó en un rango conocido, usar el orden secuencial para rellenar
-    if (!nextItemId) {
-      if (!segmentedItems.includes('sofa')) nextItemId = 'sofa';
-      else if (!segmentedItems.includes('table')) nextItemId = 'table';
-      else if (!segmentedItems.includes('shelf')) nextItemId = 'shelf';
-    }
-
-    if (nextItemId && !segmentedItems.includes(nextItemId)) {
-      // Registrar el marcador del pin en la UI
-      const pinId = `${nextItemId}-${Date.now()}`;
-      setClickPins(prev => [...prev, { x, y, id: pinId }]);
-      
-      // Iniciar segmentación con coordenadas reales
-      handleSegmentItemWithCoords(nextItemId, x, y);
-    }
-  };
-
-  // Manejar la subida de un archivo real del usuario al VPS
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // 1. Subir foto de la casa del usuario
+  const handleSourceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsScanning(true);
-    setScanningType('sam');
-    setClickPins([]); // Resetear pines anteriores
-    setSegmentedItems([]); // Resetear inventario anterior
-    setSelectedIds([]); // Resetear selección anterior
+    // Preview local inmediato
+    const localUrl = URL.createObjectURL(file);
+    setSourceImage(localUrl);
+    setCurrentStep('segment');
+    setSegmentedFurniture([]);
+    setClickPins([]);
+    setStatusMessage('Subiendo imagen al servidor...');
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      // Subir archivo binario directamente a tu VPS de Contabo
-      const response = await fetch('https://roomix-featureproposal.tuweben72hs.com/api/upload', {
+      const response = await fetch(`${API_BASE}/api/upload`, {
         method: 'POST',
         body: formData
       });
       const data = await response.json();
-      console.log('API Upload Response:', data);
 
       if (data.success && data.url) {
-        setUserImage(data.url);
+        setSourceImageFile(data.url);
+        setStatusMessage('✅ Imagen subida. Hacé clic sobre tus muebles para recortarlos.');
       } else {
-        alert('Error al procesar la imagen en el servidor.');
+        setStatusMessage('⚠️ Error al subir. Podés seguir con preview local.');
+        setSourceImageFile(localUrl);
       }
-    } catch (error) {
-      console.warn('API de subida no disponible en el VPS (usando fallback local):', error);
-      // Fallback local: generar Object URL temporal para previsualización
-      const localUrl = URL.createObjectURL(file);
-      setUserImage(localUrl);
-    } finally {
-      setIsScanning(false);
-      setScanningType(null);
+    } catch {
+      setStatusMessage('⚠️ Servidor no disponible. Usando preview local.');
+      setSourceImageFile(localUrl);
     }
   };
 
-  // Cargar imagen de ejemplo del usuario
-  const handleLoadSampleImage = (e?: React.MouseEvent) => {
-    if (e) e.stopPropagation(); // Evitar gatillar el click de la zona de subida
-    setIsScanning(true);
-    setScanningType('sam');
-    setClickPins([]); // Resetear pines anteriores
-    setSegmentedItems([]); 
-    setSelectedIds([]); 
-    setTimeout(() => {
-      // Cargamos el living amoblado propio del usuario (Unsplash)
-      setUserImage('https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?w=800&q=80');
-      setIsScanning(false);
-      setScanningType(null);
-    }, 800);
-  };
+  // 2. Clic en la imagen para segmentar un mueble
+  const handleSourceImageClick = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!sourceImageFile || isSegmenting) return;
+    if (segmentedFurniture.length >= 5) {
+      setStatusMessage('⚠️ Máximo 5 muebles. Eliminá uno para agregar otro.');
+      return;
+    }
 
-  // Segmentación interactiva enviando las coordenadas al VPS
-  const handleSegmentItemWithCoords = async (id: string, x: number, y: number) => {
-    if (segmentedItems.includes(id)) return; // Ya segmentado
+    const rect = e.currentTarget.getBoundingClientRect();
+    const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+    const yPct = ((e.clientY - rect.top) / rect.height) * 100;
 
-    setIsScanning(true);
-    setScanningType('sam');
-    
+    const pinId = `pin-${Date.now()}`;
+    const newPin: ClickPin = { x: xPct, y: yPct, id: pinId, status: 'pending' };
+    setClickPins(prev => [...prev, newPin]);
+
+    setIsSegmenting(true);
+    setStatusMessage('🤖 SAM 2 está recortando tu mueble...');
+
     try {
-      const response = await fetch('https://roomix-featureproposal.tuweben72hs.com/api/segment', {
+      const response = await fetch(`${API_BASE}/api/segment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          image_url: userImage || 'https://images.unsplash.com/photo-1583847268964-b28dc8f51f92?w=800&q=80',
-          x: x / 100, // Enviar coordenadas normalizadas de 0.0 a 1.0
-          y: y / 100,
+          image_url: sourceImageFile,
+          x: xPct / 100,
+          y: yPct / 100,
           label: 1
         })
       });
       const data = await response.json();
-      console.log('API Segment Response:', data);
-      
-      // Agregar al inventario
-      setSegmentedItems(prev => [...prev, id]);
-      setSelectedIds(prev => [...prev, id]);
-    } catch (error) {
-      console.warn('API de segmentación no disponible en el VPS (usando fallback local):', error);
-      // Fallback local robusto
-      setSegmentedItems(prev => [...prev, id]);
-      setSelectedIds(prev => [...prev, id]);
+
+      if (data.success && data.furniture_url) {
+        const furnitureId = `furniture-${Date.now()}`;
+        const newItem: SegmentedFurniture = {
+          id: furnitureId,
+          imageUrl: data.furniture_url,
+          label: `Mueble ${segmentedFurniture.length + 1}`,
+          selected: true,
+          clickCoords: { x: xPct, y: yPct }
+        };
+        setSegmentedFurniture(prev => [...prev, newItem]);
+        setClickPins(prev => prev.map(p => p.id === pinId ? { ...p, status: 'done' } : p));
+        setStatusMessage(`✅ ¡Mueble ${segmentedFurniture.length + 1} recortado! Seguí clickeando o pasá al siguiente paso.`);
+      } else if (data.mode === 'demo_fallback') {
+        // Demo mode — simular con placeholder
+        const furnitureId = `furniture-${Date.now()}`;
+        const newItem: SegmentedFurniture = {
+          id: furnitureId,
+          imageUrl: data.masked_image_url || sourceImageFile,
+          label: `Mueble ${segmentedFurniture.length + 1} (demo)`,
+          selected: true,
+          clickCoords: { x: xPct, y: yPct }
+        };
+        setSegmentedFurniture(prev => [...prev, newItem]);
+        setClickPins(prev => prev.map(p => p.id === pinId ? { ...p, status: 'done' } : p));
+        setStatusMessage(`✅ Mueble detectado (modo demo). Configurá REPLICATE_API_TOKEN en el VPS para recorte real.`);
+      } else {
+        setClickPins(prev => prev.map(p => p.id === pinId ? { ...p, status: 'error' } : p));
+        setStatusMessage('❌ No se pudo recortar el mueble. Intentá en otra zona.');
+      }
+    } catch {
+      setClickPins(prev => prev.map(p => p.id === pinId ? { ...p, status: 'error' } : p));
+      setStatusMessage('❌ Error de conexión con el servidor. Verificá que el backend esté corriendo.');
     } finally {
-      setIsScanning(false);
-      setScanningType(null);
+      setIsSegmenting(false);
     }
+  }, [sourceImageFile, isSegmenting, segmentedFurniture.length]);
+
+  // 3. Toggle selección de un mueble
+  const toggleFurnitureSelection = (id: string) => {
+    setSegmentedFurniture(prev =>
+      prev.map(f => f.id === id ? { ...f, selected: !f.selected } : f)
+    );
   };
 
-  // Manejar la subida de la foto de la propiedad de destino (nuevo hogar)
-  const handleDestinationFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // 4. Eliminar un mueble del inventario
+  const removeFurniture = (id: string) => {
+    setSegmentedFurniture(prev => prev.filter(f => f.id !== id));
+  };
+
+  // 5. Subir foto de la casa destino
+  const handleDestinationUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsScanning(true);
-    setScanningType('erase');
+    const localUrl = URL.createObjectURL(file);
+    setDestinationImage(localUrl);
+    setCleanDestinationImage(null);
+    setCompositeResult(null);
+    setCurrentStep('compose');
+    setStatusMessage('Subiendo imagen destino al servidor...');
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      // Subir foto del depto a buscar
-      const response = await fetch('https://roomix-featureproposal.tuweben72hs.com/api/upload', {
+      const response = await fetch(`${API_BASE}/api/upload`, {
         method: 'POST',
         body: formData
       });
       const data = await response.json();
-      console.log('API Destination Upload Response:', data);
 
       if (data.success && data.url) {
-        setDestinationImage(data.url);
-        setIsDestinationEmpty(false); // Volver al estado amoblado para mostrar la nueva foto primero
-        setCleanDestinationImage(null); // Resetear imagen limpia
+        setDestinationImageUrl(data.url);
+        setStatusMessage('✅ Imagen destino subida. Presioná "Vaciar y Amueblar con IA" para continuar.');
       } else {
-        alert('Error al procesar la imagen de destino en el servidor.');
+        setStatusMessage('⚠️ Error al subir imagen destino.');
       }
-    } catch (error) {
-      console.warn('API de subida no disponible en el VPS (usando fallback local):', error);
-      // Fallback local
-      const localUrl = URL.createObjectURL(file);
-      setDestinationImage(localUrl);
-      setIsDestinationEmpty(false);
-      setCleanDestinationImage(null);
-    } finally {
-      setIsScanning(false);
-      setScanningType(null);
+    } catch {
+      setStatusMessage('⚠️ Servidor no disponible para subir destino.');
     }
   };
 
-  // Activar/desactivar proyección de los muebles empacados
-  const handleToggleProjectedItem = (id: string) => {
-    setSelectedIds(prev => 
-      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
-    );
-  };
-
-  // Conmutar el vaciado del departamento de destino con inpainting
-  const handleToggleDestinationEmpty = async () => {
-    if (isDestinationEmpty) {
-      // Si ya estaba vacío, volvemos a mostrar la versión amoblada
-      setIsDestinationEmpty(false);
+  // 6. FLUJO COMPLETO: Vaciar destino + componer muebles
+  const handleComposeWithAI = async () => {
+    if (!destinationImageUrl) {
+      setStatusMessage('⚠️ Primero subí la foto de la casa destino.');
       return;
     }
 
-    setIsScanning(true);
-    setScanningType('erase');
-    
-    const imgToClean = destinationImage || PROPERTY_DATA.bgAmuebladoUrl;
-    
+    const selectedFurniture = segmentedFurniture.filter(f => f.selected);
+    if (selectedFurniture.length === 0) {
+      setStatusMessage('⚠️ Seleccioná al menos un mueble del inventario.');
+      return;
+    }
+
+    setIsComposing(true);
+    setCompositeResult(null);
+
+    // PASO 1: Vaciar la casa destino con LaMa
+    setStatusMessage('🧹 Paso 1/2: Vaciando la casa destino con IA (LaMa Inpainting)...');
+    setIsCleaning(true);
+
     try {
-      const response = await fetch('https://roomix-featureproposal.tuweben72hs.com/api/clean-property', {
+      const cleanResponse = await fetch(`${API_BASE}/api/clean-property`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_url: destinationImageUrl })
+      });
+      const cleanData = await cleanResponse.json();
+
+      let cleanUrl = destinationImageUrl;
+      if (cleanData.success && cleanData.clean_image_url) {
+        cleanUrl = cleanData.clean_image_url;
+        setCleanDestinationImage(cleanUrl);
+      }
+      setIsCleaning(false);
+
+      // PASO 2: Componer muebles en la casa vacía con FLUX Fill
+      setStatusMessage('🎨 Paso 2/2: La IA está colocando tus muebles en la nueva casa (15-30 seg)...');
+
+      const composeResponse = await fetch(`${API_BASE}/api/compose`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          image_url: imgToClean
+          clean_room_url: cleanUrl,
+          furniture_urls: selectedFurniture.map(f => f.imageUrl),
+          room_description: 'living room'
         })
       });
-      const data = await response.json();
-      console.log('API Clean Response:', data);
-      
-      if (data.success && data.clean_image_url) {
-        setCleanDestinationImage(data.clean_image_url);
+      const composeData = await composeResponse.json();
+
+      if (composeData.success && composeData.composed_image_url) {
+        setCompositeResult(composeData.composed_image_url);
+        setCurrentStep('result');
+        setStatusMessage('🎉 ¡Listo! Así quedaría tu nueva casa con tus muebles.');
       } else {
-        // Fallback si no devuelve URL
-        setCleanDestinationImage(PROPERTY_DATA.bgVacioUrl);
+        setStatusMessage('❌ Error al componer la imagen. Intentá de nuevo.');
       }
-      setIsDestinationEmpty(true);
-      
-      // Auto-aplicar todos los muebles recortados de la casa origen
-      setSelectedIds(segmentedItems);
-      
     } catch (error) {
-      console.warn('API de vaciado no disponible en el VPS (usando fallback local):', error);
-      // Fallback local robusto
-      setCleanDestinationImage(PROPERTY_DATA.bgVacioUrl);
-      setIsDestinationEmpty(true);
-      
-      // Auto-aplicar todos los muebles recortados de la casa origen en fallback
-      setSelectedIds(segmentedItems);
+      console.error('Compose error:', error);
+      setStatusMessage('❌ Error de conexión. Verificá que el backend esté corriendo.');
     } finally {
-      setIsScanning(false);
-      setScanningType(null);
+      setIsCleaning(false);
+      setIsComposing(false);
     }
   };
 
-  // Cálculos de Espacio
-  const activeFurniture = Object.values(AVAILABLE_FURNITURE).filter(
-    item => segmentedItems.includes(item.id) && selectedIds.includes(item.id)
-  );
-  
-  const totalOccupiedArea = activeFurniture.reduce((acc, item) => acc + (item.width * item.depth), 0);
-  const occupancyPercentage = Math.min(100, Math.round((totalOccupiedArea / PROPERTY_DATA.livingArea) * 100));
-
-  const wallItems = activeFurniture.filter(item => item.id === 'sofa' || item.id === 'shelf');
-  const totalWallLengthOccupied = wallItems.reduce((acc, item) => acc + item.width, 0);
-  const remainingWallLength = PROPERTY_DATA.wallLength - totalWallLengthOccupied;
-
-  // Alertas Inteligentes del AI Spatial Checker
-  const getSpatialAlerts = () => {
-    const alerts = [];
-    
-    if (!isDestinationEmpty) {
-      alerts.push({
-        type: 'info',
-        text: 'ℹ️ Para colocar tus muebles en la nueva casa, primero tenés que vaciarla. Activá el switch "Vaciar departamento con IA" arriba para remover la decoración del dueño anterior.'
-      });
-      return alerts;
-    }
-
-    if (segmentedItems.length === 0) {
-      alerts.push({
-        type: 'info',
-        text: '💡 Tu inventario está vacío. Hacé clic sobre los muebles de la foto de tu casa actual (izquierda) para recortarlos con la IA y empezar a probarlos en la nueva casa.'
-      });
-      return alerts;
-    }
-
-    if (activeFurniture.length === 0) {
-      alerts.push({
-        type: 'info',
-        text: '📦 Tenés muebles en tu inventario pero ninguno está activo. Marcá las casillas de los muebles recortados para proyectarlos en el living vacío.'
-      });
-      return alerts;
-    }
-
-    // Alerta de porcentaje de ocupación
-    if (occupancyPercentage > 35) {
-      alerts.push({
-        type: 'warning',
-        text: `⚠️ Alta densidad de mobiliario: Tus muebles ocupan el ${occupancyPercentage}% del área útil del living (${totalOccupiedArea.toFixed(2)}m² de ${PROPERTY_DATA.livingArea}m²). Se recomienda optimizar la distribución.`
-      });
-    } else {
-      alerts.push({
-        type: 'success',
-        text: `✨ Distribución de espacio óptima: Los muebles ocupan solo el ${occupancyPercentage}% del living. Hay excelente circulación libre.`
-      });
-    }
-
-    // Alerta de pared principal
-    if (remainingWallLength < 0) {
-      alerts.push({
-        type: 'danger',
-        text: `🚨 Conflicto en la pared principal: El Sillón y la Biblioteca exceden el largo de la pared principal por ${Math.abs(remainingWallLength).toFixed(2)}m. La biblioteca deberá ser reubicada contra otra pared.`
-      });
-    } else if (selectedIds.includes('sofa') && selectedIds.includes('shelf')) {
-      alerts.push({
-        type: 'info',
-        text: `💡 Organización de pared: El Sillón y la Biblioteca entran juntos sobre la pared principal. Te quedan ${remainingWallLength.toFixed(2)}m libres de pared para colocar otros objetos.`
-      });
-    }
-
-    // Alerta de mesa y circulación
-    if (selectedIds.includes('table')) {
-      if (selectedIds.includes('sofa') && selectedIds.includes('shelf')) {
-        alerts.push({
-          type: 'warning',
-          text: '⚠️ Conflicto de circulación: Al colocar la Mesa de Comedor junto con el Sillón y la Biblioteca, el paso hacia el ventanal del balcón se reduce a 60cm. Sugerimos rotar la mesa.'
-        });
-      } else {
-        alerts.push({
-          type: 'success',
-          text: '✅ La Mesa de Comedor tiene un radio de giro de sillas de 90cm a la redonda, cumpliendo con los estándares de ergonomía.'
-        });
-      }
-    }
-
-    return alerts;
+  // 7. Resetear todo
+  const handleReset = () => {
+    setSourceImage(null);
+    setSourceImageFile(null);
+    setSegmentedFurniture([]);
+    setClickPins([]);
+    setDestinationImage(null);
+    setDestinationImageUrl(null);
+    setCleanDestinationImage(null);
+    setCompositeResult(null);
+    setCurrentStep('upload-source');
+    setStatusMessage(null);
   };
 
-  const activeAlerts = getSpatialAlerts();
-
-  // Copiar plantilla de correo al portapapeles
-  const handleCopyEmail = () => {
-    const emailBody = `Hola Nacho,
-
-Vi la propuesta para sumarme como dev a roomix.ai y decidí programar esta feature interactiva ("Roomix Virtual Mover") para demostrarte cómo pienso producto y cómo uso IA para construir en el día a día.
-
-En lugar de mandarte un CV aburrido, acá tenés la demo funcionando:
-https://roomix-virtual-mover.vercel.app (o tu enlace local)
-
-¡Hagamos esa semana de prueba!
-
-Un abrazo,
-[Tu Nombre]`;
-
-    navigator.clipboard.writeText(emailBody).then(() => {
-      setCopySuccess(true);
-      setTimeout(() => setCopySuccess(false), 3000);
-    });
-  };
+  // Helpers
+  const selectedCount = segmentedFurniture.filter(f => f.selected).length;
+  const hasSelectedFurniture = selectedCount > 0;
 
   return (
     <>
       {/* ═══════ NAVBAR ═══════ */}
       <nav className="nav">
-        <a href="/" className="nav-logo">
+        <a href="/" className="nav-logo" onClick={(e) => { e.preventDefault(); handleReset(); }}>
           ROOM<span>IX</span>
           <span className="nav-logo-badge">Virtual Mover</span>
         </a>
         <ul className="nav-links">
           <li><a href="#demo">Simulador</a></li>
           <li><a href="#arquitectura">Cómo Funciona</a></li>
-          <li><a href="#portfolio">Habilidades & Pitch</a></li>
         </ul>
-        <a href="mailto:contacto@roomix.ai?subject=real%20estate%20sexy" className="nav-cta">
-          Aplicar ↗
-        </a>
+        <button onClick={handleReset} className="nav-cta">
+          Nueva Sesión ↻
+        </button>
       </nav>
 
       {/* ═══════ HERO AREA ═══════ */}
       <section className="hero">
-        <span className="hero-tag">FEATURE PROPOSAL FOR ROOMIX.AI</span>
+        <span className="hero-tag">ROOMIX VIRTUAL MOVER — IA REAL</span>
         <h1>Mudate con tus muebles,<br />no con tus dudas.</h1>
         <p>
-          Subí una foto de tu living actual, hacé clic en tus muebles para que la IA los recorte con **SAM (Segment Anything)** y mudalos virtualmente a tu futuro departamento. Eliminá los muebles viejos con inpainting y audita si tus cosas entran en el plano.
+          Subí una foto de tu living actual, hacé clic en tus muebles para que la IA los recorte con <strong>SAM 2</strong>, 
+          subí la foto de tu nueva casa, y dejá que la IA vacíe los muebles viejos y coloque los tuyos automáticamente.
         </p>
       </section>
 
-      {/* ═══════ PROCESS STEP BADGES ═══════ */}
+      {/* ═══════ PROGRESS STEPS ═══════ */}
       <div className="process-indicator">
-        <div className={`process-step-badge ${!userImage ? 'active' : ''}`}>
-          <div className="process-step-num">1</div>
-          <span>Subí la foto de tu casa</span>
+        <div className={`process-step-badge ${currentStep === 'upload-source' ? 'active' : ''} ${sourceImage ? 'completed' : ''}`}>
+          <div className="process-step-num">{sourceImage ? '✓' : '1'}</div>
+          <span>Subí tu foto</span>
         </div>
-        <div className={`process-step-badge ${userImage && segmentedItems.length === 0 ? 'active' : ''}`}>
-          <div className="process-step-num">2</div>
-          <span>Hacé clic en tus muebles para recortar</span>
+        <div className={`process-step-badge ${currentStep === 'segment' ? 'active' : ''} ${segmentedFurniture.length > 0 ? 'completed' : ''}`}>
+          <div className="process-step-num">{segmentedFurniture.length > 0 ? '✓' : '2'}</div>
+          <span>Recortá muebles</span>
         </div>
-        <div className={`process-step-badge ${userImage && segmentedItems.length > 0 ? 'active' : ''}`}>
-          <div className="process-step-num">3</div>
-          <span>Vacía el nuevo depto y proyéctalos</span>
+        <div className={`process-step-badge ${currentStep === 'upload-dest' || currentStep === 'compose' ? 'active' : ''} ${destinationImage ? 'completed' : ''}`}>
+          <div className="process-step-num">{destinationImage ? '✓' : '3'}</div>
+          <span>Casa destino</span>
+        </div>
+        <div className={`process-step-badge ${currentStep === 'result' ? 'active' : ''}`}>
+          <div className="process-step-num">{compositeResult ? '✓' : '4'}</div>
+          <span>Resultado IA</span>
         </div>
       </div>
 
-      {/* ═══════ WORKSPACE (DEMO) ═══════ */}
+      {/* ═══════ STATUS BAR ═══════ */}
+      {statusMessage && (
+        <div className="status-bar">
+          <div className="status-content">
+            {(isSegmenting || isCleaning || isComposing) && <span className="status-spinner" />}
+            <span>{statusMessage}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════ WORKSPACE ═══════ */}
       <section className="workspace" id="demo">
-        <div className={`workspace-grid ${isScanning ? 'scanning' : ''}`}>
-          
-          {/* COLUMNA IZQUIERDA: TU CASA ACTUAL Y SEGMENTADOR */}
+        <div className="workspace-grid">
+
+          {/* ═══════ COLUMNA IZQUIERDA: CASA ORIGEN + INVENTARIO ═══════ */}
           <div className="segmenter-card">
             <div className="segmenter-header">
-              <h3>🏠 1. Mi Casa Actual</h3>
-              <p>Subí una foto de tu living y hacé clic sobre tus muebles para que la IA los recorte.</p>
+              <h3>🏠 Tu Casa Actual</h3>
+              <p>Subí una foto y hacé clic sobre cada mueble que quieras llevar a tu nueva casa.</p>
             </div>
 
             {/* Zona de subida o foto interactiva */}
-            {!userImage ? (
-              <div className="upload-zone" onClick={handleUploadZoneClick}>
-                <input 
-                  type="file" 
-                  ref={fileInputRef} 
-                  onChange={handleFileChange} 
-                  accept="image/*" 
-                  style={{ display: 'none' }} 
+            {!sourceImage ? (
+              <div className="upload-zone" onClick={() => sourceFileRef.current?.click()}>
+                <input
+                  type="file"
+                  ref={sourceFileRef}
+                  onChange={handleSourceUpload}
+                  accept="image/*"
+                  style={{ display: 'none' }}
                 />
-                <div className="upload-icon">⬆</div>
+                <div className="upload-icon">📸</div>
                 <div className="upload-text">
                   <h5>Subí una foto de tu living actual</h5>
-                  <p style={{ marginBottom: '12px', fontSize: '11px', color: 'var(--text-secondary)' }}>
+                  <p style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
                     Hacé clic para seleccionar una foto de tu PC
                   </p>
-                  <button 
-                    onClick={handleLoadSampleImage}
-                    style={{
-                      background: 'rgba(16, 185, 129, 0.1)',
-                      border: '1px solid var(--emerald)',
-                      color: 'var(--emerald)',
-                      padding: '6px 12px',
-                      borderRadius: '12px',
-                      fontSize: '11px',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}
-                  >
-                    O usar foto de ejemplo interactiva
-                  </button>
                 </div>
               </div>
             ) : (
-              <div className="segmenter-view-container" onClick={handleImageClick}>
-                <img 
-                  src={userImage} 
-                  alt="Living del usuario" 
+              <div className="segmenter-view-container" onClick={handleSourceImageClick}>
+                <img
+                  src={sourceImage || undefined}
+                  alt="Tu casa actual"
                   className="segmenter-img"
-                  style={{ filter: isScanning && scanningType === 'sam' ? 'brightness(0.6)' : 'brightness(1)' }}
+                  style={{ filter: isSegmenting ? 'brightness(0.6)' : 'brightness(1)' }}
                 />
-                
-                {/* Capa de escaneo visual */}
-                <div className="segmenter-scan-overlay" />
 
-                {/* MÁSCARAS DE SEGMENTACIÓN INTERACTIVAS (SOLO PARA LA IMAGEN DE EJEMPLO) */}
-                {userImage && userImage.includes('photo-1583847268964-b28dc8f51f92') && (
-                  <>
-                    <div 
-                      className={`segment-mask mask-sofa ${segmentedItems.includes('sofa') ? 'selected' : ''}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Simular click en el centro del sillón
-                        const rect = e.currentTarget.parentElement!.getBoundingClientRect();
-                        const clientX = rect.left + rect.width * 0.49;
-                        const clientY = rect.top + rect.height * 0.60;
-                        handleImageClick({
-                          currentTarget: e.currentTarget.parentElement,
-                          clientX: clientX,
-                          clientY: clientY,
-                        } as any);
-                      }}
-                    >
-                      <span className="segment-tooltip">{AVAILABLE_FURNITURE.sofa.tooltip}</span>
-                      <div className="segment-indicator">
-                        {segmentedItems.includes('sofa') ? '✓' : '+'}
-                      </div>
-                    </div>
+                {/* Scan overlay */}
+                {isSegmenting && <div className="segmenter-scan-overlay active" />}
 
-                    <div 
-                      className={`segment-mask mask-table ${segmentedItems.includes('table') ? 'selected' : ''}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Simular click en el centro de la mesa
-                        const rect = e.currentTarget.parentElement!.getBoundingClientRect();
-                        const clientX = rect.left + rect.width * 0.52;
-                        const clientY = rect.top + rect.height * 0.85;
-                        handleImageClick({
-                          currentTarget: e.currentTarget.parentElement,
-                          clientX: clientX,
-                          clientY: clientY,
-                        } as any);
-                      }}
-                    >
-                      <span className="segment-tooltip">{AVAILABLE_FURNITURE.table.tooltip}</span>
-                      <div className="segment-indicator">
-                        {segmentedItems.includes('table') ? '✓' : '+'}
-                      </div>
-                    </div>
-
-                    <div 
-                      className={`segment-mask mask-shelf ${segmentedItems.includes('shelf') ? 'selected' : ''}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Simular click en el centro de la planta/estantería
-                        const rect = e.currentTarget.parentElement!.getBoundingClientRect();
-                        const clientX = rect.left + rect.width * 0.88;
-                        const clientY = rect.top + rect.height * 0.54;
-                        handleImageClick({
-                          currentTarget: e.currentTarget.parentElement,
-                          clientX: clientX,
-                          clientY: clientY,
-                        } as any);
-                      }}
-                    >
-                      <span className="segment-tooltip">{AVAILABLE_FURNITURE.shelf.tooltip}</span>
-                      <div className="segment-indicator">
-                        {segmentedItems.includes('shelf') ? '✓' : '+'}
-                      </div>
-                    </div>
-                  </>
-                )}
-
-                {/* Pines tridimensionales de clics dinámicos de SAM */}
+                {/* Click pins */}
                 {clickPins.map(pin => (
-                  <div 
+                  <div
                     key={pin.id}
-                    className="sam-click-pin"
+                    className={`sam-click-pin ${pin.status}`}
                     style={{ left: `${pin.x}%`, top: `${pin.y}%` }}
                   />
                 ))}
+
+                {/* Crosshair hint */}
+                {!isSegmenting && segmentedFurniture.length === 0 && (
+                  <div className="click-hint">
+                    <span>👆 Hacé clic en un mueble para recortarlo</span>
+                  </div>
+                )}
               </div>
             )}
 
-            {/* LISTADO DE MUEBLES RECORTADOS (INVENTARIO DINÁMICO) */}
-            {userImage && (
-              <div style={{ marginTop: '16px' }}>
-                <h4 style={{ fontSize: '14px', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span>📦</span> Muebles recortados ({segmentedItems.length})
+            {/* Botón para cambiar la foto */}
+            {sourceImage && (
+              <button
+                onClick={() => sourceFileRef.current?.click()}
+                className="btn-change-photo"
+              >
+                <input
+                  type="file"
+                  ref={sourceFileRef}
+                  onChange={handleSourceUpload}
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                />
+                📷 Cambiar foto
+              </button>
+            )}
+
+            {/* INVENTARIO DE MUEBLES RECORTADOS */}
+            {sourceImage && (
+              <div className="inventory-section">
+                <h4 className="inventory-title">
+                  <span>📦</span> Muebles recortados ({segmentedFurniture.length}/5)
                 </h4>
-                {segmentedItems.length === 0 ? (
-                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic' }}>
-                    Pasá el mouse por la foto de arriba y hacé clic sobre el Sillón, la Mesa o la Biblioteca para recortarlos con la IA.
+
+                {segmentedFurniture.length === 0 ? (
+                  <p className="inventory-empty">
+                    Hacé clic sobre los muebles de tu foto para que la IA los recorte automáticamente.
                   </p>
                 ) : (
                   <div className="inventory-list">
-                    {segmentedItems.map(itemId => {
-                      const item = AVAILABLE_FURNITURE[itemId];
-                      const isProjected = selectedIds.includes(itemId);
-                      return (
-                        <div 
-                          key={item.id}
-                          className={`inventory-item ${isProjected ? 'active' : ''}`}
-                          onClick={() => handleToggleProjectedItem(item.id)}
+                    {segmentedFurniture.map(item => (
+                      <div
+                        key={item.id}
+                        className={`inventory-item ${item.selected ? 'active' : ''}`}
+                      >
+                        <div
+                          className="item-checkbox"
+                          onClick={() => toggleFurnitureSelection(item.id)}
                         >
-                          <div className="item-checkbox">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
-                              <polyline points="20 6 9 17 4 12" />
-                            </svg>
-                          </div>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        </div>
 
-                          <div className="item-thumb-wrapper">
-                            <img 
-                              src={item.imgUrl} 
-                              alt={item.name} 
-                              className="item-thumb" 
-                              style={{ mixBlendMode: 'multiply', filter: 'contrast(1.1) brightness(1.05)' }} 
-                            />
-                          </div>
+                        <div className="item-thumb-wrapper" onClick={() => toggleFurnitureSelection(item.id)}>
+                          <img
+                            src={item.imageUrl}
+                            alt={item.label}
+                            className="item-thumb"
+                          />
+                        </div>
 
-                          <div className="item-info">
-                            <div className="item-name" style={{ fontSize: '13px' }}>{item.name}</div>
-                            <div className="item-specs" style={{ fontSize: '10px' }}>
-                              <span>An: {item.width.toFixed(2)}m</span>
-                              <span>Pr: {item.depth.toFixed(2)}m</span>
-                              <span>Al: {item.height.toFixed(2)}m</span>
-                            </div>
+                        <div className="item-info" onClick={() => toggleFurnitureSelection(item.id)}>
+                          <div className="item-name">{item.label}</div>
+                          <div className="item-specs">
+                            <span>Recortado con SAM 2</span>
                           </div>
                         </div>
-                      );
-                    })}
+
+                        <button
+                          className="item-remove"
+                          onClick={(e) => { e.stopPropagation(); removeFurniture(item.id); }}
+                          title="Eliminar mueble"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
                   </div>
+                )}
+
+                {/* Botón para avanzar al siguiente paso */}
+                {hasSelectedFurniture && !destinationImage && (
+                  <button
+                    className="btn-next-step"
+                    onClick={() => { setCurrentStep('upload-dest'); destFileRef.current?.click(); }}
+                  >
+                    Siguiente: Subir foto de la nueva casa →
+                  </button>
                 )}
               </div>
             )}
           </div>
 
-          {/* COLUMNA DERECHA: EL NUEVO DEPARTAMENTO Y PROYECCIÓN */}
+          {/* ═══════ COLUMNA DERECHA: CASA DESTINO + RESULTADO ═══════ */}
           <div className="canvas-panel">
             <div className="canvas-header">
               <div className="property-title">
-                <h4>Nuevo Departamento en Palermo</h4>
+                <h4>🏗️ Tu Nueva Casa</h4>
                 <p>
-                  <span className="badge-location">Palermo Hollywood, CABA</span>
-                  <span>• {PROPERTY_DATA.rooms}</span>
-                  <span>• {PROPERTY_DATA.livingArea.toFixed(1)} m² útiles</span>
+                  <span>Subí la foto de tu futuro hogar</span>
                 </p>
               </div>
-              
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                {/* Botón para subir la foto del departamento a buscar */}
-                <button 
-                  onClick={() => destinationFileInputRef.current?.click()}
-                  style={{
-                    background: 'rgba(59, 130, 246, 0.1)',
-                    border: '1px solid var(--blue-neon)',
-                    color: 'var(--blue-neon)',
-                    padding: '6px 12px',
-                    borderRadius: '12px',
-                    fontSize: '11px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    transition: 'all 0.2s',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '4px'
-                  }}
+                <button
+                  onClick={() => destFileRef.current?.click()}
+                  className="btn-upload-dest"
                 >
-                  <input 
-                    type="file" 
-                    ref={destinationFileInputRef} 
-                    onChange={handleDestinationFileChange} 
-                    accept="image/*" 
-                    style={{ display: 'none' }} 
+                  <input
+                    type="file"
+                    ref={destFileRef}
+                    onChange={handleDestinationUpload}
+                    accept="image/*"
+                    style={{ display: 'none' }}
                   />
-                  <span>⬆ Subir depto</span>
+                  ⬆ Subir foto destino
                 </button>
-
                 <div className="badge-ai-audit">
-                  <span className="pulse-dot"></span>
-                  AI Spatial Audit
+                  <span className="pulse-dot" />
+                  AI Powered
                 </div>
               </div>
             </div>
 
-            {/* CONTROL DE INPAINTING DE VACIADO */}
-            <div className="inpainting-control">
-              <div className="inpainting-info">
-                <h5>🧹 Vaciar departamento con IA</h5>
-                <p>Usa inpainting generativo para remover los muebles del inquilino anterior</p>
-              </div>
-              <label className="switch">
-                <input 
-                  type="checkbox" 
-                  checked={isDestinationEmpty}
-                  onChange={handleToggleDestinationEmpty}
-                />
-                <span className="slider"></span>
-              </label>
-            </div>
-
-            {/* CANVAS DE PROYECCIÓN */}
-            <div className={`workspace-canvas ${isDestinationEmpty ? 'is-empty' : ''}`}>
-              {/* Contenedor de fondos con crossfade */}
-              <div className="canvas-image-wrapper">
-                <img 
-                  src={destinationImage || PROPERTY_DATA.bgAmuebladoUrl} 
-                  alt="Departamento Amueblado Antiguo" 
-                  className="canvas-bg"
-                  style={{ 
-                    opacity: isDestinationEmpty ? 0 : 1,
-                    filter: isScanning && scanningType === 'erase' ? 'brightness(0.4)' : 'brightness(1)'
-                  }}
-                />
-                <img 
-                  src={cleanDestinationImage || PROPERTY_DATA.bgVacioUrl} 
-                  alt="Departamento Vacío Limpio" 
-                  className="canvas-bg"
-                  style={{ 
-                    opacity: isDestinationEmpty ? 1 : 0,
-                    filter: isScanning && scanningType === 'erase' ? 'brightness(0.4)' : 'brightness(0.95)'
-                  }}
-                />
-              </div>
-
-              <div className="canvas-overlay" />
-              <div className="canvas-scanner" />
-
-              {/* Estado: No vacío (aún con muebles viejos) */}
-              {!isDestinationEmpty && (
+            {/* CANVAS DE VISUALIZACIÓN */}
+            <div className="workspace-canvas">
+              {!destinationImage && !compositeResult ? (
+                /* Estado vacío — pedir que suba foto destino */
                 <div className="canvas-empty-state">
                   <div className="empty-state-content">
-                    <h5>Remoción de Muebles Requerida</h5>
-                    <p>El living está ocupado por la decoración anterior. Activá el interruptor **"Vaciar departamento con IA"** para limpiarlo por inpainting.</p>
-                  </div>
-                </div>
-              )}
-
-              {/* Estado: Vacío pero sin muebles seleccionados */}
-              {isDestinationEmpty && activeFurniture.length === 0 && (
-                <div className="canvas-empty-state">
-                  <div className="empty-state-content">
-                    <h5>Hogar Limpio e Inpintado</h5>
-                    {segmentedItems.length === 0 ? (
-                      <p>Excelente. La IA vació el living de Palermo. Ahora, recortá tus propios muebles en la foto de la izquierda para proyectarlos acá.</p>
+                    {!hasSelectedFurniture ? (
+                      <>
+                        <h5>Primero recortá tus muebles</h5>
+                        <p>Usá el panel izquierdo para subir la foto de tu casa y recortar los muebles que querés mudar.</p>
+                      </>
                     ) : (
-                      <p>Excelente. Seleccioná los muebles recortados de tu inventario de mudanza abajo de la foto para ver cómo quedan en el living vacío.</p>
+                      <>
+                        <h5>Ahora subí la foto de tu nueva casa</h5>
+                        <p>Tenés {selectedCount} mueble{selectedCount > 1 ? 's' : ''} listo{selectedCount > 1 ? 's' : ''}. Subí la foto del departamento destino para que la IA los coloque.</p>
+                        <button
+                          className="btn-upload-inline"
+                          onClick={() => destFileRef.current?.click()}
+                        >
+                          📸 Subir foto de la nueva casa
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>
-              )}
+              ) : compositeResult ? (
+                /* RESULTADO FINAL */
+                <div className="result-container">
+                  <img
+                    src={compositeResult || undefined}
+                    alt="Tu nueva casa con tus muebles"
+                    className="result-img"
+                  />
+                  <div className="result-badge">✨ Resultado IA</div>
+                </div>
+              ) : (
+                /* Foto del destino subida pero no procesada */
+                <div className="canvas-image-wrapper">
+                  <img
+                    src={cleanDestinationImage || destinationImage || undefined}
+                    alt="Casa destino"
+                    className="canvas-bg"
+                    style={{
+                      opacity: 1,
+                      filter: (isCleaning || isComposing) ? 'brightness(0.4)' : 'brightness(1)'
+                    }}
+                  />
 
-              {/* MUEBLES DEL USUARIO PROYECTADOS EN EL CANVAS (SOLO SI EL CANVAS ESTÁ VACÍO Y EL MUEBLE ACTIVO) */}
-              {isDestinationEmpty && (
-                <>
-                  <div className={`projected-furniture furniture-sofa ${selectedIds.includes('sofa') && segmentedItems.includes('sofa') ? 'visible' : ''}`}>
-                    <img 
-                      src={AVAILABLE_FURNITURE.sofa.imgUrl} 
-                      alt="Sillón Chesterfield del usuario" 
-                      className="projected-img"
-                      style={{ mixBlendMode: 'multiply', filter: 'contrast(1.1) brightness(1.05)' }}
-                    />
-                    <div className="furniture-shadow" />
-                  </div>
+                  {/* Scanner effect while processing */}
+                  {(isCleaning || isComposing) && (
+                    <div className="canvas-scanner active" />
+                  )}
 
-                  <div className={`projected-furniture furniture-table ${selectedIds.includes('table') && segmentedItems.includes('table') ? 'visible' : ''}`}>
-                    <img 
-                      src={AVAILABLE_FURNITURE.table.imgUrl} 
-                      alt="Mesa del usuario" 
-                      className="projected-img"
-                      style={{ mixBlendMode: 'multiply', filter: 'contrast(1.05) brightness(1.08)' }}
-                    />
-                    <div className="furniture-shadow" style={{ bottom: '-6%', left: '5%', width: '90%' }} />
-                  </div>
-
-                  <div className={`projected-furniture furniture-shelf ${selectedIds.includes('shelf') && segmentedItems.includes('shelf') ? 'visible' : ''}`}>
-                    <img 
-                      src={AVAILABLE_FURNITURE.shelf.imgUrl} 
-                      alt="Biblioteca del usuario" 
-                      className="projected-img"
-                      style={{ mixBlendMode: 'multiply', filter: 'contrast(1.08) brightness(1.04)' }}
-                    />
-                    <div className="furniture-shadow" style={{ bottom: '-3%', left: '8%', width: '84%', height: '8px' }} />
-                  </div>
-                </>
+                  {/* Processing overlay */}
+                  {(isCleaning || isComposing) && (
+                    <div className="processing-overlay">
+                      <div className="processing-content">
+                        <div className="processing-spinner" />
+                        <h5>{isCleaning ? 'Vaciando la casa...' : 'Colocando tus muebles...'}</h5>
+                        <p>{isCleaning ? 'LaMa Inpainting está eliminando los muebles existentes' : 'FLUX Fill está componiendo tus muebles con perspectiva y sombras reales'}</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
 
-            {/* SPATIAL CHECKER / REPORT PANEL */}
-            <div className="spatial-checker">
-              <div className="checker-header">
-                <h4>📐 Auditoría Física en Tiempo Real</h4>
-                <div className="badge-ai-audit" style={{ background: 'rgba(16,185,129,0.1)', borderColor: 'var(--emerald)', color: 'var(--emerald)' }}>
-                  Active Scan
+            {/* BOTÓN DE ACCIÓN PRINCIPAL */}
+            {destinationImage && !compositeResult && (
+              <button
+                className="btn-compose"
+                onClick={handleComposeWithAI}
+                disabled={isComposing || !hasSelectedFurniture}
+              >
+                {isComposing ? (
+                  <>
+                    <span className="btn-spinner" />
+                    Procesando con IA...
+                  </>
+                ) : (
+                  <>🧹🎨 Vaciar Casa + Colocar Mis Muebles con IA</>
+                )}
+              </button>
+            )}
+
+            {/* Botón reiniciar después del resultado */}
+            {compositeResult && (
+              <div className="result-actions">
+                <button className="btn-compose" onClick={handleReset}>
+                  🔄 Nueva mudanza virtual
+                </button>
+                <a
+                  href={compositeResult}
+                  download="roomix-resultado.png"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-download"
+                >
+                  ⬇ Descargar resultado
+                </a>
+              </div>
+            )}
+
+            {/* BEFORE/AFTER COMPARISON (only when we have result) */}
+            {compositeResult && cleanDestinationImage && (
+              <div className="comparison-section">
+                <h4>📊 Comparación Antes / Después</h4>
+                <div className="comparison-grid">
+                  <div className="comparison-card">
+                    <span className="comparison-label">Casa destino original</span>
+                    <img src={destinationImage!} alt="Antes" />
+                  </div>
+                  <div className="comparison-card">
+                    <span className="comparison-label">Vaciada con LaMa</span>
+                    <img src={cleanDestinationImage || undefined} alt="Vaciada" />
+                  </div>
+                  <div className="comparison-card highlight">
+                    <span className="comparison-label">Con tus muebles (FLUX)</span>
+                    <img src={compositeResult || undefined} alt="Resultado" />
+                  </div>
                 </div>
               </div>
-
-              <div className="checker-metrics">
-                <div className="metric-card">
-                  <div className="metric-label">Espacio Útil del Living</div>
-                  <div className="metric-val">{PROPERTY_DATA.livingArea.toFixed(1)} m²</div>
-                </div>
-
-                <div className="metric-card">
-                  <div className="metric-label">Área Muebles Proyectados</div>
-                  <div className="metric-val">{totalOccupiedArea.toFixed(2)} m²</div>
-                  <div className="metric-bar-bg">
-                    <div 
-                      className={`metric-bar-fill ${occupancyPercentage > 35 ? 'warning' : 'success'}`} 
-                      style={{ width: `${occupancyPercentage}%` }}
-                    />
-                  </div>
-                </div>
-
-                <div className="metric-card">
-                  <div className="metric-label">Pared Principal Disponible</div>
-                  <div className="metric-val">
-                    {remainingWallLength < 0 ? 'Excedido' : `${remainingWallLength.toFixed(2)} m`}
-                  </div>
-                  <div className="metric-bar-bg">
-                    <div 
-                      className={`metric-bar-fill ${remainingWallLength < 0 ? 'danger' : remainingWallLength < 1 ? 'warning' : 'success'}`}
-                      style={{ 
-                        width: `${Math.max(0, Math.min(100, (remainingWallLength / PROPERTY_DATA.wallLength) * 100))}%` 
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="checker-alerts">
-                {activeAlerts.map((alert, i) => (
-                  <div key={i} className={`checker-alert ${alert.type}`}>
-                    <span className="alert-icon">
-                      {alert.type === 'success' && '✓'}
-                      {alert.type === 'info' && '🛈'}
-                      {alert.type === 'warning' && '⚠'}
-                      {alert.type === 'danger' && '⊗'}
-                    </span>
-                    <div>{alert.text}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
+            )}
           </div>
 
         </div>
       </section>
 
-      {/* ═══════ CÓMO FUNCIONA (PITCH TÉCNICO DE IA) ═══════ */}
+      {/* ═══════ CÓMO FUNCIONA ═══════ */}
       <section className="explainer" id="arquitectura">
         <div className="explainer-card">
           <h3>La Tecnología Detrás de la Mudanza Virtual</h3>
           <div className="explainer-grid">
-            
+
             <div className="explainer-item">
               <div className="explainer-item-num">01</div>
-              <h4>Segmentación Interactiva SAM</h4>
+              <h4>Recorte con SAM 2</h4>
               <p>
-                Al subir la foto de tu casa actual, el backend de Python procesa los clics en el frontend para correr **Segment Anything Model (SAM)** en modo interactivo en tiempo real, recortando con precisión tus muebles con bordes antialiasing.
+                Al hacer clic sobre un mueble, enviamos las coordenadas a <strong>Meta SAM 2</strong> (Segment Anything Model), 
+                que genera una máscara precisa. Luego recortamos el mueble como PNG transparente con Pillow.
               </p>
             </div>
 
             <div className="explainer-item">
               <div className="explainer-item-num">02</div>
-              <h4>Borrado por Inpainting (Eraser)</h4>
+              <h4>Vaciado con LaMa</h4>
               <p>
-                Para remover los muebles viejos del departamento de destino, utilizamos modelos de restauración como **LaMa Inpainting** o **Stable Diffusion Eraser**, reconstruyendo la textura de las paredes y pisos de fondo.
+                La casa destino se vacía usando <strong>LaMa Inpainting</strong>, un modelo de restauración que 
+                rellena las zonas de muebles con la textura del piso y las paredes de fondo.
               </p>
             </div>
 
             <div className="explainer-item">
               <div className="explainer-item-num">03</div>
-              <h4>Proyección Tridimensional y Sombras</h4>
+              <h4>Composición con FLUX Fill</h4>
               <p>
-                Alineamos la perspectiva tridimensional del living mediante estimadores de homografía. Finalmente, aplicamos sombreado de oclusión ambiental simulado para integrar las patas y la base de tus muebles al nuevo suelo.
+                Finalmente, <strong>FLUX Fill Dev</strong> de Black Forest Labs compone tus muebles reales en la 
+                habitación vacía, respetando perspectiva, iluminación y sombras.
               </p>
-            </div>
-
-          </div>
-        </div>
-      </section>
-
-      {/* ═══════ PORTFOLIO & POSTULACIÓN (DEVELOPER PORTRAIT) ═══════ */}
-      <section className="dev-portrait" id="portfolio">
-        <div className="dev-portrait-container">
-          <div className="dev-header">
-            <h2>Developer Portrait</h2>
-            <p>Un dev obsesivo por el diseño, el código robusto y la IA aplicada.</p>
-          </div>
-
-          <div className="dev-grid">
-            
-            {/* COLUMNA BIO Y SKILLS */}
-            <div className="dev-bio">
-              <h3>Hola Nacho, soy tu próximo <span>Dev Creativo</span></h3>
-              <p>
-                Me obsesiona tanto el pixel-perfect y las transiciones fluidas de una interfaz como la eficiencia de base de datos y la arquitectura de agentes de IA en el backend. Trabajo cómodamente en todo el stack con la misma rigurosidad.
-              </p>
-              <p>
-                Diseñé esta feature para Roomix porque responde a un dolor real de los usuarios, es técnicamente retadora y calza perfectamente con el ADN de staging e innovación visual de la startup.
-              </p>
-
-              <div className="skills-grid">
-                
-                <div className="skill-card">
-                  <h4><span>▸</span> Frontend & Motion</h4>
-                  <p>React, Next.js, TypeScript, CSS nativo premium, Framer Motion, animaciones fluidas y Web3D/Three.js.</p>
-                </div>
-
-                <div className="skill-card">
-                  <h4><span>▸</span> Backend & ML</h4>
-                  <p>Python (FastAPI, Django), PyTorch, Hugging Face, pipelines de Visión por Computadora (SAM, Diffusers).</p>
-                </div>
-
-                <div className="skill-card">
-                  <h4><span>▸</span> Data & Infra</h4>
-                  <p>SQL (PostgreSQL, PostGIS para datos geográficos), NoSQL (MongoDB, Redis) y despliegue rápido en Vercel/AWS.</p>
-                </div>
-
-                <div className="skill-card">
-                  <h4><span>▸</span> Product Mindset</h4>
-                  <p>Resolución de problemas de negocio, velocidad extrema de shipping y obsesión por la experiencia del usuario.</p>
-                </div>
-
-              </div>
-
-              {/* Prompting & Workflow */}
-              <div className="workflow-card">
-                <h4><span>⚡</span> Prompting & AI Workflow Diario</h4>
-                <ul>
-                  <li><strong>Prompting Avanzado:</strong> Uso Chain of Thought (CoT) para razonamiento lógico y few-shot para formateo estricto de outputs (integrado con validadores Pydantic en Python).</li>
-                  <li><strong>AI-Driven Dev:</strong> Trabajo codo a codo con asistentes de IA usando frameworks de brainstorming estructurados (como "superpowers") para refinar ideas antes de escribir una sola línea de código.</li>
-                  <li><strong>Agentes Autónomos:</strong> Diseño sistemas multi-agente con estado (LangGraph/Hermes) con herramientas de Function Calling estructuradas.</li>
-                </ul>
-              </div>
-            </div>
-
-            {/* COLUMNA POSTULACIÓN CORREO */}
-            <div className="app-cta-panel">
-              <h3>¿Hacemos match?</h3>
-              <p>
-                Si te gusta cómo pienso el producto, cómo estructuro el código y cómo ejecuto con velocidad, hagamos esa semana de prueba y demostremos que podemos shippear más rápido que cualquier equipo tradicional.
-              </p>
-
-              <div className="email-template">
-                <div className="email-meta-row">
-                  <div className="email-meta-label">Para:</div>
-                  <div className="email-meta-value">contacto@roomix.ai</div>
-                </div>
-                <div className="email-meta-row">
-                  <div className="email-meta-label">Asunto:</div>
-                  <div className="email-meta-value" style={{ color: 'var(--emerald)', fontWeight: 'bold' }}>real estate sexy</div>
-                </div>
-                <div className="email-body">
-{`Hola Nacho,
-
-Vi la propuesta para sumarme como dev a roomix.ai y decidí programar esta feature interactiva ("Roomix Virtual Mover") para demostrarte cómo pienso producto y cómo uso IA para construir en el día a día.
-
-En lugar de mandarte un CV aburrido, acá tenés la demo funcionando:
-https://roomix-virtual-mover.vercel.app (o tu enlace local)
-
-¡Hagamos esa semana de prueba!
-
-Un abrazo.`}
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <button className="btn-apply" onClick={handleCopyEmail} style={{ flexGrow: 1 }}>
-                  {copySuccess ? '✓ ¡Copiado al Portapapeles!' : 'Copiar Plantilla de Mail'}
-                </button>
-                <a 
-                  href="mailto:contacto@roomix.ai?subject=real%20estate%20sexy&body=Hola%20Nacho%2C%0A%0AVi%20la%20propuesta%20para%20sumarme%20como%20dev%20a%20roomix.ai%20y%20decid%C3%AD%20programar%20esta%20feature%20interactiva%20%28%22Roomix%20Virtual%20Mover%22%29%20para%20demostrarte%20c%C3%B3mo%20pienso%20producto%20y%20c%C3%B3mo%20uso%20IA%20para%20construir%20en%20el%20d%C3%ADa%20a%20d%C3%ADa.%0A%0AEn%20lugar%20de%20mandarte%20un%20CV%20aburrido%2C%20ac%C3%A1%20ten%C3%A9s%20la%20demo%20funcionando.%0A%0A%C2%A1Hagamos%20esa%20semana%20de%20prueba%21%0A%0AUn%20abrazo."
-                  className="btn-apply" 
-                  style={{ width: 'auto', background: 'var(--bg-card)', border: '1px solid var(--border-active)', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                >
-                  Enviar Directo ↗
-                </a>
-              </div>
             </div>
 
           </div>
@@ -1016,7 +695,7 @@ Un abrazo.`}
       {/* ═══════ FOOTER ═══════ */}
       <footer className="footer">
         <div className="footer-brand">ROOM<span>IX</span></div>
-        <p>Propuesta conceptual de feature interactiva para Roomix.ai • 2026</p>
+        <p>Virtual Mover — Powered by SAM 2, LaMa & FLUX Fill • 2026</p>
       </footer>
     </>
   );
